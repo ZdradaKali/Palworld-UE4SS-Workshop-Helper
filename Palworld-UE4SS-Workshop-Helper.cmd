@@ -388,6 +388,19 @@ function Ensure-MemberVariableLayout {
     return [pscustomobject]@{ Changed=$true; Pending=$false; Result='Copied from the Workshop UE4SS folder' }
 }
 
+function Ensure-PreparedMemberVariableLayout {
+    param([hashtable]$Paths, [string]$PreparedRoot)
+    $destination = Join-Path $PreparedRoot 'MemberVariableLayout.ini'
+    if (Test-Path -LiteralPath $destination -PathType Leaf) { return 'Included in the selected archive' }
+    foreach ($source in @($Paths.WorkshopLayout, $Paths.GitHubLayout)) {
+        if (Test-Path -LiteralPath $source -PathType Leaf) {
+            Copy-Item -LiteralPath $source -Destination $destination -Force
+            if (Test-Path -LiteralPath $destination -PathType Leaf) { return "Preserved from: $source" }
+        }
+    }
+    throw 'MemberVariableLayout.ini is missing from the selected archive, the Workshop runtime and the current GitHub runtime.'
+}
+
 function Show-InstallPreview {
     param([hashtable]$Paths, [object]$Package)
     Write-Heading 'Installation preview'
@@ -400,9 +413,10 @@ function Show-InstallPreview {
     Write-Host "SHA-256     : $($Package.Sha256)"
     Write-Host ''
     Write-Host 'The helper will:'
-    Write-Host '  - back up the current GitHub UE4SS runtime and proxy, if present;'
-    Write-Host '  - preserve an existing UE4SS-settings.ini;'
-    Write-Host '  - merge existing Workshop UE4SS mods into the GitHub Mods directory;'
+    Write-Host '  - move the current GitHub UE4SS runtime and proxy into a backup, if present;'
+    Write-Host '  - build a clean runtime from the selected archive instead of overlaying old files;'
+    Write-Host '  - preserve existing mods and UE4SS-settings.ini;'
+    Write-Host '  - merge existing Workshop UE4SS mods into the clean runtime;'
     Write-Host '  - replace the Workshop Mods directory with a verified junction;'
     Write-Host '  - verify MemberVariableLayout.ini and copy the Workshop file if needed;'
     Write-Host '  - disable the Workshop UE4SS.dll without deleting it.'
@@ -421,26 +435,56 @@ function Install-ExperimentalPackage {
         throw "The Workshop Mods path exists but is not a directory: $($Paths.WorkshopMods)"
     }
     $backup = New-BackupRoot $Paths 'Install'
-    $state = @{ JunctionCreated=$false; WorkshopMoved=$false; WorkshopDllDisabled=$false; HadGitHubRoot=$false; HadProxy=$false; HadJunction=(Test-IsJunction $Paths.WorkshopMods) }
+    $state = @{
+        JunctionCreated=$false
+        WorkshopMoved=$false
+        WorkshopDllDisabled=$false
+        HadGitHubRoot=(Test-Path -LiteralPath $Paths.GitHubRoot -PathType Container)
+        HadProxy=(Test-Path -LiteralPath $Paths.GitHubProxy -PathType Leaf)
+        HadJunction=(Test-IsJunction $Paths.WorkshopMods)
+        OldRuntimeMoved=$false
+        OldProxyMoved=$false
+        NewRuntimeInstalled=$false
+        NewProxyInstalled=$false
+    }
     try {
-        if (Test-Path -LiteralPath $Paths.GitHubRoot -PathType Container) {
-            $state.HadGitHubRoot = $true
-            Copy-Directory $Paths.GitHubRoot (Join-Path $backup 'PreviousGitHubRuntime')
-        }
-        if (Test-Path -LiteralPath $Paths.GitHubProxy -PathType Leaf) {
-            $state.HadProxy = $true
-            Copy-Item -LiteralPath $Paths.GitHubProxy -Destination (Join-Path $backup 'Previous-dwmapi.dll')
-        }
         Save-BackupManifest $backup 'Install' @{ sourceBuild=$Package.BuildKey; sourceRepository=$Package.Repository; sourceTag=$Package.Tag; sourceAsset=$Package.AssetName; sourceSha256=$Package.Sha256 }
 
-        if ((Test-Path -LiteralPath $Paths.WorkshopMods -PathType Container) -and -not (Test-IsJunction $Paths.WorkshopMods)) {
-            Copy-Directory $Paths.WorkshopMods $Paths.GitHubMods
+        $preparedRoot = Join-Path $backup 'PreparedGitHubRuntime'
+        $preparedMods = Join-Path $preparedRoot 'Mods'
+        New-Item -ItemType Directory -Path $preparedRoot | Out-Null
+        if ($state.HadGitHubRoot) {
+            Copy-Directory $Paths.GitHubMods $preparedMods
+            $existingSettings = Join-Path $Paths.GitHubRoot 'UE4SS-settings.ini'
+            if (Test-Path -LiteralPath $existingSettings -PathType Leaf) {
+                Copy-Item -LiteralPath $existingSettings -Destination (Join-Path $preparedRoot 'UE4SS-settings.ini') -Force
+            }
         }
-        Copy-Ue4ssOverlay $Package.Layout.Ue4ssSource $Paths.GitHubRoot
+        if ((Test-Path -LiteralPath $Paths.WorkshopMods -PathType Container) -and -not (Test-IsJunction $Paths.WorkshopMods)) {
+            Copy-Directory $Paths.WorkshopMods $preparedMods
+        }
+        Copy-Ue4ssOverlay $Package.Layout.Ue4ssSource $preparedRoot
+        $layoutResult = Ensure-PreparedMemberVariableLayout $Paths $preparedRoot
+        Write-Host "MemberVariableLayout.ini: $layoutResult" -ForegroundColor DarkGray
+        if (-not (Test-Path -LiteralPath (Join-Path $preparedRoot 'UE4SS.dll') -PathType Leaf)) {
+            throw 'The prepared UE4SS runtime does not contain UE4SS.dll.'
+        }
+
+        if ($state.HadGitHubRoot) {
+            Move-Item -LiteralPath $Paths.GitHubRoot -Destination (Join-Path $backup 'PreviousGitHubRuntime')
+            $state.OldRuntimeMoved = $true
+        }
+        if ($state.HadProxy) {
+            Move-Item -LiteralPath $Paths.GitHubProxy -Destination (Join-Path $backup 'Previous-dwmapi.dll')
+            $state.OldProxyMoved = $true
+        }
+        Move-Item -LiteralPath $preparedRoot -Destination $Paths.GitHubRoot
+        $state.NewRuntimeInstalled = $true
         Copy-Item -LiteralPath $Package.Layout.ProxySource -Destination $Paths.GitHubProxy -Force
-        $layoutResult = Ensure-MemberVariableLayout $Paths -Apply -Required
-        Write-Host "MemberVariableLayout.ini: $($layoutResult.Result)" -ForegroundColor DarkGray
-        if (-not (Test-Path -LiteralPath $Paths.GitHubDll -PathType Leaf) -or -not (Test-Path -LiteralPath $Paths.GitHubProxy -PathType Leaf)) {
+        $state.NewProxyInstalled = $true
+        if (-not (Test-Path -LiteralPath $Paths.GitHubDll -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $Paths.GitHubProxy -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $Paths.GitHubLayout -PathType Leaf)) {
             throw 'UE4SS runtime verification failed after copying.'
         }
 
@@ -490,14 +534,18 @@ function Install-ExperimentalPackage {
             if ($state.WorkshopDllDisabled -and (Test-Path -LiteralPath $state.DisabledDllPath) -and -not (Test-Path -LiteralPath $Paths.WorkshopDll)) {
                 Move-Item -LiteralPath $state.DisabledDllPath -Destination $Paths.WorkshopDll
             }
-            if (Test-Path -LiteralPath $Paths.GitHubRoot -PathType Container) {
+            if ($state.NewRuntimeInstalled -and (Test-Path -LiteralPath $Paths.GitHubRoot -PathType Container)) {
                 Move-Item -LiteralPath $Paths.GitHubRoot -Destination (Join-Path $backup 'FailedPartialGitHubRuntime')
             }
-            if ($state.HadGitHubRoot) { Copy-Directory (Join-Path $backup 'PreviousGitHubRuntime') $Paths.GitHubRoot }
-            if (Test-Path -LiteralPath $Paths.GitHubProxy -PathType Leaf) {
+            if ($state.OldRuntimeMoved -and (Test-Path -LiteralPath (Join-Path $backup 'PreviousGitHubRuntime') -PathType Container)) {
+                Move-Item -LiteralPath (Join-Path $backup 'PreviousGitHubRuntime') -Destination $Paths.GitHubRoot
+            }
+            if ($state.NewProxyInstalled -and (Test-Path -LiteralPath $Paths.GitHubProxy -PathType Leaf)) {
                 Move-Item -LiteralPath $Paths.GitHubProxy -Destination (Join-Path $backup 'Failed-dwmapi.dll') -Force
             }
-            if ($state.HadProxy) { Copy-Item -LiteralPath (Join-Path $backup 'Previous-dwmapi.dll') -Destination $Paths.GitHubProxy }
+            if ($state.OldProxyMoved -and (Test-Path -LiteralPath (Join-Path $backup 'Previous-dwmapi.dll') -PathType Leaf)) {
+                Move-Item -LiteralPath (Join-Path $backup 'Previous-dwmapi.dll') -Destination $Paths.GitHubProxy
+            }
             Write-Host 'Previous state restored. Failed files were retained in the backup.' -ForegroundColor Yellow
         } catch {
             Write-Host "Automatic rollback also failed: $($_.Exception.Message)" -ForegroundColor Red
