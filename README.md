@@ -30,6 +30,7 @@ The helper can:
 
 - Find your Palworld installation, including installations in another Steam library.
 - Let you choose and install either reviewed Experimental UE4SS build.
+- Build a clean runtime when installing or switching builds, so files left by the previous build cannot remain active.
 - Keep your existing `UE4SS-settings.ini`.
 - Move existing Workshop UE4SS mods into the correct location.
 - Create and verify the required Mods junction.
@@ -52,6 +53,8 @@ Everything is contained in one `.cmd` file. The PowerShell source is embedded in
 6. Read the summary and confirm if everything looks correct.
 
 The tool returns to the main menu after each operation.
+
+You can run the installation option again later and choose the other build. The helper prepares the replacement separately, preserves your mods and `UE4SS-settings.ini`, then moves the previous runtime into the new backup before installing the replacement. It does not extract one provider's runtime over the other.
 
 If you install more UE4SS Workshop mods later, use:
 
@@ -87,6 +90,8 @@ _UE4SS-Helper-Backup-20260804-120000-Restore
 ```
 
 Keep the latest backup until you have launched the game a few times and confirmed that your mods still work.
+
+If a clean replacement fails after the old runtime has been moved, the helper attempts to put the previous runtime, proxy DLL and junction state back automatically. Failed replacement files are retained in the backup for inspection.
 
 ## PowerShell warning
 
