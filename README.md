@@ -33,7 +33,7 @@ Everything is contained in one `.cmd` file. The PowerShell source is embedded in
 
 1. Download and extract the latest release ZIP.
 2. Close Palworld completely.
-3. Run `Palworld-UE4SS-Workshop-Helper-v2.0.0.cmd`.
+3. Run `Palworld-UE4SS-Workshop-Helper.cmd`.
 4. Choose `Install or update Experimental UE4SS automatically`.
 5. Read the summary and confirm if everything looks correct.
 
