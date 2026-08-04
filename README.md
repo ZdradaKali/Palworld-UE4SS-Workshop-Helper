@@ -6,16 +6,21 @@ I originally made it to accompany my Steam guide because copying several large P
 
 ## Important
 
-This helper uses the Palworld-specific Experimental release from [`Okaetsu/RE-UE4SS`](https://github.com/Okaetsu/RE-UE4SS/releases/tag/experimental-palworld).
+This helper supports two reviewed Experimental UE4SS builds. The [official Experimental release](https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/experimental-latest) is the recommended default because it is the newest upstream version.
 
-Version 2.1.0 accepts only:
+The [Palworld-specific Experimental release](https://github.com/Okaetsu/RE-UE4SS/releases/tag/experimental-palworld) is available as an alternative for mods that specifically require it, such as PalSchema, or if the official build causes a compatibility problem.
+
+Version 2.1.0 accepts only these reviewed archives:
 
 ```text
-Tag:   experimental-palworld
-Asset: UE4SS-Palworld.zip
+Official: UE4SS-RE/RE-UE4SS, experimental-latest
+          UE4SS_v3.0.1-1018-g662df915.zip
+
+Palworld: Okaetsu/RE-UE4SS, experimental-palworld
+          UE4SS-Palworld.zip
 ```
 
-The archive SHA-256 is pinned in the helper. If the release asset changes, the helper stops and asks you to download an updated helper instead of installing an unreviewed archive.
+Both archive SHA-256 values are pinned in the helper. If either release asset changes, the helper stops and asks you to download an updated helper instead of installing an unreviewed archive. It does not fall back to or silently select another build.
 
 This is for the **Windows Steam client version of Palworld**. It is not a dedicated-server installer.
 
@@ -24,7 +29,7 @@ This is for the **Windows Steam client version of Palworld**. It is not a dedica
 The helper can:
 
 - Find your Palworld installation, including installations in another Steam library.
-- Download and install the reviewed Palworld-specific Experimental UE4SS build.
+- Let you choose and install either reviewed Experimental UE4SS build.
 - Keep your existing `UE4SS-settings.ini`.
 - Move existing Workshop UE4SS mods into the correct location.
 - Create and verify the required Mods junction.
@@ -43,7 +48,8 @@ Everything is contained in one `.cmd` file. The PowerShell source is embedded in
 2. Close Palworld completely.
 3. Run `Palworld-UE4SS-Workshop-Helper.cmd`.
 4. Choose `Install or update Experimental UE4SS automatically`.
-5. Read the summary and confirm if everything looks correct.
+5. Choose the official build unless a mod requires the Palworld-specific build or you are troubleshooting a compatibility problem.
+6. Read the summary and confirm if everything looks correct.
 
 The tool returns to the main menu after each operation.
 
@@ -61,11 +67,13 @@ Before installing anything, the helper checks:
 - the release and download URLs;
 - the downloaded file size;
 - the SHA-256 digest published by GitHub;
-- the additional SHA-256 value pinned in this helper release;
+- the additional SHA-256 value pinned for the selected build in this helper release;
 - every path stored inside the ZIP;
-- the expected `dwmapi.dll`, `ue4ss\UE4SS.dll` and `ue4ss\MemberVariableLayout.ini` files.
+- the expected `dwmapi.dll` and `ue4ss\UE4SS.dll` files.
 
 If anything is unexpected, the helper stops instead of trying to guess.
+
+The helper also makes sure `MemberVariableLayout.ini` exists. The Palworld-specific archive already includes it; when using the official archive, the helper copies the Workshop version if necessary.
 
 The downloaded UE4SS files are not executed by the helper. They are checked, extracted and copied into the Palworld folder for the game to load later.
 
