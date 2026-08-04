@@ -20,11 +20,26 @@ Set-StrictMode -Version 2.0
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $script:HelperVersion = '2.1.0'
-$script:GitHubOwner = 'Okaetsu'
-$script:GitHubRepository = 'RE-UE4SS'
-$script:RequiredTag = 'experimental-palworld'
-$script:RequiredAsset = 'UE4SS-Palworld.zip'
-$script:TrustedAssetSha256 = '768A45718FBB9E429AC5CC3CE4A139A1B7B468BFF31B4A136AE483D725ACA1CA'
+$script:Builds = [ordered]@{
+    Official = [pscustomobject]@{
+        Key = 'Official'
+        DisplayName = 'Official Experimental build'
+        Owner = 'UE4SS-RE'
+        Repository = 'RE-UE4SS'
+        Tag = 'experimental-latest'
+        AssetName = 'UE4SS_v3.0.1-1018-g662df915.zip'
+        TrustedSha256 = '590AE4C6463DB61497123B9ED35373596C39FB27F736E2078A02B476599671BA'
+    }
+    Palworld = [pscustomobject]@{
+        Key = 'Palworld'
+        DisplayName = 'Palworld-specific Experimental build'
+        Owner = 'Okaetsu'
+        Repository = 'RE-UE4SS'
+        Tag = 'experimental-palworld'
+        AssetName = 'UE4SS-Palworld.zip'
+        TrustedSha256 = '768A45718FBB9E429AC5CC3CE4A139A1B7B468BFF31B4A136AE483D725ACA1CA'
+    }
+}
 $script:PalworldAppId = '1623730'
 $script:GameRoot = $null
 
@@ -232,21 +247,21 @@ function Save-BackupManifest {
 }
 
 function Get-ExperimentalRelease {
-    $api = "https://api.github.com/repos/$($script:GitHubOwner)/$($script:GitHubRepository)/releases/tags/$($script:RequiredTag)"
-    Write-Host 'Checking the Palworld-specific Experimental UE4SS release...'
+    param([object]$Build)
+    $api = "https://api.github.com/repos/$($Build.Owner)/$($Build.Repository)/releases/tags/$($Build.Tag)"
+    Write-Host "Checking: $($Build.DisplayName)..."
     $headers = @{ Accept = 'application/vnd.github+json'; 'User-Agent' = "Palworld-UE4SS-Workshop-Helper/$($script:HelperVersion)" }
     $release = Invoke-RestMethod -Uri $api -Headers $headers -UseBasicParsing -TimeoutSec 30
-    if ([string]$release.tag_name -ne $script:RequiredTag) { throw "GitHub returned unexpected tag: $($release.tag_name)" }
-    if ([string]$release.html_url -ne "https://github.com/$($script:GitHubOwner)/$($script:GitHubRepository)/releases/tag/$($script:RequiredTag)") {
+    if ([string]$release.tag_name -ne $Build.Tag) { throw "GitHub returned unexpected tag: $($release.tag_name)" }
+    if ([string]$release.html_url -ne "https://github.com/$($Build.Owner)/$($Build.Repository)/releases/tag/$($Build.Tag)") {
         throw 'GitHub returned an unexpected release URL.'
     }
     $assets = @($release.assets | Where-Object {
-        [string]$_.name -ceq $script:RequiredAsset -and
-        [string]$_.browser_download_url -ceq "https://github.com/$($script:GitHubOwner)/$($script:GitHubRepository)/releases/download/$($script:RequiredTag)/$($script:RequiredAsset)"
+        [string]$_.name -ceq $Build.AssetName -and
+        [string]$_.browser_download_url -ceq "https://github.com/$($Build.Owner)/$($Build.Repository)/releases/download/$($Build.Tag)/$($Build.AssetName)"
     })
     if ($assets.Count -ne 1) {
-        $names = @($assets | ForEach-Object name) -join ', '
-        throw "Expected exactly one $($script:RequiredAsset) asset, but found $($assets.Count): $names. The release layout may have changed; no file was downloaded."
+        throw "Expected exactly one $($Build.AssetName) asset, but found $($assets.Count). The release layout may have changed; no file was downloaded."
     }
     return [pscustomobject]@{ Release=$release; Asset=$assets[0] }
 }
@@ -285,7 +300,8 @@ function Get-ExtractedLayout {
 }
 
 function Get-ExperimentalPackage {
-    $releaseInfo = Get-ExperimentalRelease
+    param([object]$Build)
+    $releaseInfo = Get-ExperimentalRelease $Build
     $asset = $releaseInfo.Asset
     $release = $releaseInfo.Release
     $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "Palworld-UE4SS-Helper-$([guid]::NewGuid().ToString('N'))"
@@ -302,8 +318,8 @@ function Get-ExperimentalPackage {
             $expectedHash = ([string]$asset.digest -replace '^(?i)sha256:', '').ToUpperInvariant()
             if ($hash -ne $expectedHash) { throw "SHA-256 mismatch. Expected $expectedHash, received $hash." }
         }
-        if ($hash -ne $script:TrustedAssetSha256) {
-            throw "The Palworld release archive has changed since this helper was reviewed. Expected trusted SHA-256 $($script:TrustedAssetSha256), received $hash. Download an updated helper release instead of continuing."
+        if ($hash -ne $Build.TrustedSha256) {
+            throw "The selected release archive has changed since this helper was reviewed. Expected trusted SHA-256 $($Build.TrustedSha256), received $hash. Download an updated helper release instead of continuing."
         }
         Test-ZipEntries $zipPath
         New-Item -ItemType Directory -Path $extractPath | Out-Null
@@ -311,6 +327,9 @@ function Get-ExperimentalPackage {
         $layout = Get-ExtractedLayout $extractPath
         return [pscustomobject]@{
             TempRoot=$tempRoot
+            BuildKey=[string]$Build.Key
+            BuildName=[string]$Build.DisplayName
+            Repository="$($Build.Owner)/$($Build.Repository)"
             Tag=[string]$release.tag_name
             ReleaseName=[string]$release.name
             PublishedAt=[string]$release.published_at
@@ -373,6 +392,7 @@ function Show-InstallPreview {
     param([hashtable]$Paths, [object]$Package)
     Write-Heading 'Installation preview'
     Write-Host "Game folder : $($Paths.Root)"
+    Write-Host "Build       : $($Package.BuildName)"
     Write-Host "Source      : $($Package.DownloadUrl)"
     Write-Host "Required tag: $($Package.Tag)"
     Write-Host "Asset       : $($Package.AssetName)"
@@ -411,7 +431,7 @@ function Install-ExperimentalPackage {
             $state.HadProxy = $true
             Copy-Item -LiteralPath $Paths.GitHubProxy -Destination (Join-Path $backup 'Previous-dwmapi.dll')
         }
-        Save-BackupManifest $backup 'Install' @{ sourceTag=$Package.Tag; sourceAsset=$Package.AssetName; sourceSha256=$Package.Sha256 }
+        Save-BackupManifest $backup 'Install' @{ sourceBuild=$Package.BuildKey; sourceRepository=$Package.Repository; sourceTag=$Package.Tag; sourceAsset=$Package.AssetName; sourceSha256=$Package.Sha256 }
 
         if ((Test-Path -LiteralPath $Paths.WorkshopMods -PathType Container) -and -not (Test-IsJunction $Paths.WorkshopMods)) {
             Copy-Directory $Paths.WorkshopMods $Paths.GitHubMods
@@ -648,14 +668,38 @@ function Restore-WorkshopRuntime {
     }
 }
 
+function Select-ExperimentalBuild {
+    while ($true) {
+        Clear-Host
+        Write-Heading 'Choose the UE4SS build to install'
+        Write-Host '1. Official Experimental build (recommended)'
+        Write-Host '   Newest upstream version and the best default for most users.' -ForegroundColor DarkGray
+        Write-Host ''
+        Write-Host '2. Palworld-specific Experimental build'
+        Write-Host '   Use this if a mod specifically requires it, such as PalSchema,' -ForegroundColor DarkGray
+        Write-Host '   or if you have compatibility problems with the official build.' -ForegroundColor DarkGray
+        Write-Host ''
+        Write-Host '3. Return to the main menu'
+        Write-Host ''
+        switch ((Read-Host 'Choose a build').Trim()) {
+            '1' { return $script:Builds.Official }
+            '2' { return $script:Builds.Palworld }
+            '3' { return $null }
+            default { }
+        }
+    }
+}
+
 function Invoke-AutomaticInstall {
+    $build = Select-ExperimentalBuild
+    if ($null -eq $build) { Write-Host 'Installation cancelled. No game files were changed.'; return }
     $paths = Get-Paths
     $package = $null
     try {
-        $package = Get-ExperimentalPackage
+        $package = Get-ExperimentalPackage $build
         Show-InstallPreview $paths $package
         Write-Host ''
-        Write-Host 'Only the reviewed Palworld-specific Experimental release is accepted. Stable and DEV builds are excluded.' -ForegroundColor Yellow
+        Write-Host 'Only the reviewed archive for the selected Experimental build is accepted. Stable, DEV and every other asset are excluded.' -ForegroundColor Yellow
         if (Read-YesNo 'Install or update Experimental UE4SS now?') { Install-ExperimentalPackage $paths $package }
         else { Write-Host 'Installation cancelled. No game files were changed.' }
     } finally {
@@ -677,7 +721,7 @@ try {
     while (-not $finished) {
         Clear-Host
         Write-Host "Palworld UE4SS Workshop Helper v$($script:HelperVersion)" -ForegroundColor Cyan
-        Write-Host 'Palworld-specific Experimental UE4SS - Windows Steam version' -ForegroundColor DarkGray
+        Write-Host 'Experimental UE4SS - Windows Steam client version' -ForegroundColor DarkGray
         Write-Host ''
         if ($script:GameRoot) { Write-Host "Selected installation: $($script:GameRoot)" -ForegroundColor DarkGray; Write-Host '' }
         Write-Host '1. Install or update Experimental UE4SS automatically'
