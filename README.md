@@ -1,27 +1,35 @@
 # Palworld UE4SS Workshop Helper
 
-A small Windows helper for using the Experimental GitHub build of RE-UE4SS without breaking Palworld's Workshop dependency detection.
+A small Windows helper for using a working Experimental UE4SS build without breaking Palworld's Workshop dependency detection.
 
-It was originally made to accompany my Steam guide, mostly because copying several large PowerShell blocks by hand was not particularly convenient.
+I originally made it to accompany my Steam guide because copying several large PowerShell blocks by hand was not particularly convenient.
 
 ## Important
 
-This workaround requires the **Experimental** build of RE-UE4SS.
+This helper uses the Palworld-specific Experimental release from [`Okaetsu/RE-UE4SS`](https://github.com/Okaetsu/RE-UE4SS/releases/tag/experimental-palworld).
 
-The helper only downloads `experimental-latest` from the official [`UE4SS-RE/RE-UE4SS`](https://github.com/UE4SS-RE/RE-UE4SS) repository. It will not install a stable or DEV build.
+Version 2.1.0 accepts only:
 
-This is for the **Windows Steam version of Palworld**.
+```text
+Tag:   experimental-palworld
+Asset: UE4SS-Palworld.zip
+```
+
+The archive SHA-256 is pinned in the helper. If the release asset changes, the helper stops and asks you to download an updated helper instead of installing an unreviewed archive.
+
+This is for the **Windows Steam client version of Palworld**. It is not a dedicated-server installer.
 
 ## What it does
 
 The helper can:
 
 - Find your Palworld installation, including installations in another Steam library.
-- Download and install the latest Experimental UE4SS build.
+- Download and install the reviewed Palworld-specific Experimental UE4SS build.
 - Keep your existing `UE4SS-settings.ini`.
 - Move existing Workshop UE4SS mods into the correct location.
 - Create and verify the required Mods junction.
 - Disable the Workshop runtime DLL without deleting it.
+- Verify that `MemberVariableLayout.ini` is present.
 - Create missing `enabled.txt` files for compatible Workshop mods.
 - Check whether the current setup looks correct.
 - Return to the normal Workshop runtime later.
@@ -45,27 +53,21 @@ If you install more UE4SS Workshop mods later, use:
 Synchronize new Workshop UE4SS mods
 ```
 
-## What gets downloaded
+## Download checks
 
-The installer checks the official GitHub release tagged:
+Before installing anything, the helper checks:
 
-```text
-experimental-latest
-```
-
-It ignores DEV builds, debug files, symbols, source archives and unrelated ZIP files.
-
-Before installing anything, it checks:
-
-- the repository and release URLs;
+- the GitHub repository, release tag and exact asset name;
+- the release and download URLs;
 - the downloaded file size;
-- the SHA-256 digest published by GitHub, when available;
-- the paths stored inside the ZIP;
-- the expected `dwmapi.dll` and `ue4ss\UE4SS.dll` files.
+- the SHA-256 digest published by GitHub;
+- the additional SHA-256 value pinned in this helper release;
+- every path stored inside the ZIP;
+- the expected `dwmapi.dll`, `ue4ss\UE4SS.dll` and `ue4ss\MemberVariableLayout.ini` files.
 
-If the release contains something unexpected, the helper stops instead of trying to guess.
+If anything is unexpected, the helper stops instead of trying to guess.
 
-The downloaded UE4SS files are never executed by the helper. They are only checked, extracted and copied into the Palworld folder.
+The downloaded UE4SS files are not executed by the helper. They are checked, extracted and copied into the Palworld folder for the game to load later.
 
 ## Backups
 
@@ -93,13 +95,19 @@ Feel free to read it before running anything.
 ## A few limitations
 
 - Palworld must be closed before the helper can change files.
-- Internet access is required for automatic installation and updates.
+- Internet access is required for automatic installation.
 - The Workshop version of UE4SS must remain installed and enabled for dependency detection.
-- Future Palworld, Workshop or UE4SS updates may require changes to the helper.
+- The helper does not configure or support dedicated servers.
+- Future Palworld, Workshop or UE4SS updates may require a new helper release.
 - This cannot account for every unusual or manually modified installation.
 
 If Windows or your antivirus displays a warning, check where the file came from instead of blindly dismissing it.
 
+## Credits
+
+- [RE-UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) is maintained by the UE4SS project and its contributors.
+- The [Palworld-specific Experimental release](https://github.com/Okaetsu/RE-UE4SS/releases/tag/experimental-palworld) is provided by Okaetsu.
+
 ## Disclaimer
 
-This is an unofficial community tool. It is not affiliated with Pocketpair, Valve, GitHub or the RE-UE4SS project.
+This is an unofficial community tool. It is not affiliated with Pocketpair, Valve, GitHub, Okaetsu or the RE-UE4SS project.
