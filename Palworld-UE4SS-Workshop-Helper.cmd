@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$script:HelperVersion = '2.0.0'
+$script:HelperVersion = '2.0.1'
 $script:GitHubOwner = 'UE4SS-RE'
 $script:GitHubRepository = 'RE-UE4SS'
 $script:RequiredTag = 'experimental-latest'
@@ -155,10 +155,12 @@ function Get-Paths {
         WorkshopRoot = Join-Path $root 'Mods\NativeMods\UE4SS'
         WorkshopMods = Join-Path $root 'Mods\NativeMods\UE4SS\Mods'
         WorkshopDll = Join-Path $root 'Mods\NativeMods\UE4SS\UE4SS.dll'
+        WorkshopLayout = Join-Path $root 'Mods\NativeMods\UE4SS\MemberVariableLayout.ini'
         GitHubRoot = Join-Path $root 'Pal\Binaries\Win64\ue4ss'
         GitHubMods = Join-Path $root 'Pal\Binaries\Win64\ue4ss\Mods'
         GitHubDll = Join-Path $root 'Pal\Binaries\Win64\ue4ss\UE4SS.dll'
         GitHubProxy = Join-Path $root 'Pal\Binaries\Win64\dwmapi.dll'
+        GitHubLayout = Join-Path $root 'Pal\Binaries\Win64\ue4ss\MemberVariableLayout.ini'
     }
 }
 
@@ -336,6 +338,31 @@ function Copy-Ue4ssOverlay {
     }
 }
 
+function Ensure-MemberVariableLayout {
+    param(
+        [hashtable]$Paths,
+        [switch]$Apply,
+        [switch]$Required
+    )
+    if (Test-Path -LiteralPath $Paths.GitHubLayout -PathType Leaf) {
+        return [pscustomobject]@{ Changed=$false; Pending=$false; Result='Already present' }
+    }
+    if (-not (Test-Path -LiteralPath $Paths.WorkshopLayout -PathType Leaf)) {
+        $message = "Missing from both locations. Workshop source not found: $($Paths.WorkshopLayout)"
+        if ($Required) { throw $message }
+        return [pscustomobject]@{ Changed=$false; Pending=$false; Result=$message }
+    }
+    if (-not $Apply) {
+        return [pscustomobject]@{ Changed=$false; Pending=$true; Result='Would copy from the Workshop UE4SS folder' }
+    }
+    New-Item -ItemType Directory -Path $Paths.GitHubRoot -Force | Out-Null
+    Copy-Item -LiteralPath $Paths.WorkshopLayout -Destination $Paths.GitHubLayout -ErrorAction Stop
+    if (-not (Test-Path -LiteralPath $Paths.GitHubLayout -PathType Leaf)) {
+        throw "MemberVariableLayout.ini could not be installed: $($Paths.GitHubLayout)"
+    }
+    return [pscustomobject]@{ Changed=$true; Pending=$false; Result='Copied from the Workshop UE4SS folder' }
+}
+
 function Show-InstallPreview {
     param([hashtable]$Paths, [object]$Package)
     Write-Heading 'Installation preview'
@@ -351,6 +378,7 @@ function Show-InstallPreview {
     Write-Host '  - preserve an existing UE4SS-settings.ini;'
     Write-Host '  - merge existing Workshop UE4SS mods into the GitHub Mods directory;'
     Write-Host '  - replace the Workshop Mods directory with a verified junction;'
+    Write-Host '  - verify MemberVariableLayout.ini and copy the Workshop file if needed;'
     Write-Host '  - disable the Workshop UE4SS.dll without deleting it.'
 }
 
@@ -384,6 +412,8 @@ function Install-ExperimentalPackage {
         }
         Copy-Ue4ssOverlay $Package.Layout.Ue4ssSource $Paths.GitHubRoot
         Copy-Item -LiteralPath $Package.Layout.ProxySource -Destination $Paths.GitHubProxy -Force
+        $layoutResult = Ensure-MemberVariableLayout $Paths -Apply -Required
+        Write-Host "MemberVariableLayout.ini: $($layoutResult.Result)" -ForegroundColor DarkGray
         if (-not (Test-Path -LiteralPath $Paths.GitHubDll -PathType Leaf) -or -not (Test-Path -LiteralPath $Paths.GitHubProxy -PathType Leaf)) {
             throw 'UE4SS runtime verification failed after copying.'
         }
@@ -497,14 +527,21 @@ function Get-SyncResults {
 function Invoke-Synchronization {
     param([hashtable]$Paths)
     Write-Heading 'Synchronization preview'
+    $layoutPreview = Ensure-MemberVariableLayout $Paths
+    Write-Host "MemberVariableLayout.ini: $($layoutPreview.Result)"
+    Write-Host ''
     $preview = @(Get-SyncResults $Paths $false)
-    if ($preview.Count -eq 0) { Write-Host 'No applicable Workshop UE4SS mods were found.'; return }
-    $preview | Sort-Object Package | Format-Table -AutoSize -Wrap
-    if (@($preview | Where-Object Result -eq 'Would create enabled.txt').Count -eq 0) { return }
-    if (-not (Read-YesNo 'Create the missing enabled.txt files now?')) { return }
+    if ($preview.Count -eq 0) { Write-Host 'No applicable Workshop UE4SS mods were found.' }
+    else { $preview | Sort-Object Package | Format-Table -AutoSize -Wrap }
+    $missingEnabled = @($preview | Where-Object Result -eq 'Would create enabled.txt').Count -gt 0
+    if (-not $layoutPreview.Pending -and -not $missingEnabled) { return }
+    if (-not (Read-YesNo 'Apply the pending synchronization changes now?')) { return }
     Assert-PalworldClosed
     Write-Heading 'Synchronization result'
-    @(Get-SyncResults $Paths $true) | Sort-Object Package | Format-Table -AutoSize -Wrap
+    $layoutResult = Ensure-MemberVariableLayout $Paths -Apply
+    Write-Host "MemberVariableLayout.ini: $($layoutResult.Result)"
+    $results = @(Get-SyncResults $Paths $true)
+    if ($results.Count -gt 0) { $results | Sort-Object Package | Format-Table -AutoSize -Wrap }
 }
 
 function Show-Status {
@@ -524,6 +561,7 @@ function Show-Status {
         'Disabled Workshop DLL found' = $null -ne (Get-ChildItem -LiteralPath $Paths.WorkshopRoot -Filter 'UE4SS.dll.workshop-disabled*' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
         'Mods junction present' = $junction
         'Junction target' = $junctionTarget
+        'MemberVariableLayout.ini present' = Test-Path -LiteralPath $Paths.GitHubLayout -PathType Leaf
         'UE4SS log present' = Test-Path -LiteralPath (Join-Path $Paths.GitHubRoot 'UE4SS.log') -PathType Leaf
     } | Format-List
 }
