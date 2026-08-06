@@ -1,4 +1,7 @@
 @echo off
+rem Original scripts and helpers by ZdradaKali (GitHub) / Yani Neco (Steam) / hess_ch (Discord).
+rem Official source: https://github.com/ZdradaKali/Palworld-UE4SS-Workshop-Helper
+rem Copies from any other source are unverified and may have been modified.
 setlocal
 title Palworld UE4SS Workshop Helper
 set "PALWORLD_HELPER_FILE=%~f0"
@@ -19,7 +22,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$script:HelperVersion = '2.1.0'
+$script:HelperVersion = '2.2.0'
 $script:Builds = [ordered]@{
     Official = [pscustomobject]@{
         Key = 'Official'
@@ -76,7 +79,87 @@ function Normalize-GameRoot {
 function Test-GameRoot {
     param([string]$Path)
     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-    return (Test-Path -LiteralPath (Join-Path $Path 'Pal\Binaries\Win64') -PathType Container)
+    $win64 = Join-Path $Path 'Pal\Binaries\Win64'
+    if (-not (Test-Path -LiteralPath $win64 -PathType Container)) { return $false }
+    foreach ($candidate in @(
+        (Join-Path $Path 'Palworld.exe'),
+        (Join-Path $win64 'Palworld-Win64-Shipping.exe')
+    )) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $true }
+    }
+    return $false
+}
+
+function Write-AuditValue {
+    param(
+        [string]$Label,
+        [object]$Value,
+        [ValidateSet('Good','Bad','Warning','Neutral')][string]$State = 'Neutral'
+    )
+    $color = switch ($State) {
+        'Good' { 'Green' }
+        'Bad' { 'Red' }
+        'Warning' { 'Yellow' }
+        default { 'DarkGray' }
+    }
+    Write-Host ("{0,-40}: " -f $Label) -NoNewline
+    Write-Host ([string]$Value) -ForegroundColor $color
+}
+
+function Get-ClientTableCell {
+    param([object]$Value, [int]$Width)
+    $text = if ($null -eq $Value) { '' } else { [string]$Value }
+    if ($text.Length -gt $Width) {
+        if ($Width -le 3) { return $text.Substring(0, $Width) }
+        $text = $text.Substring(0, $Width - 3) + '...'
+    }
+    return $text.PadRight($Width)
+}
+
+function Write-ClientModReport {
+    param([object[]]$Mods)
+    $columns = @(
+        [pscustomobject]@{ Name='Mod'; Label='Mod'; Width=32 },
+        [pscustomobject]@{ Name='Package'; Label='Package'; Width=26 },
+        [pscustomobject]@{ Name='Types'; Label='Install types'; Width=14 },
+        [pscustomobject]@{ Name='ServerRule'; Label='Server-side'; Width=12 },
+        [pscustomobject]@{ Name='Dependencies'; Label='Dependencies'; Width=24 },
+        [pscustomobject]@{ Name='RuntimeState'; Label='Runtime state'; Width=28 }
+    )
+    foreach ($column in $columns) {
+        Write-Host (Get-ClientTableCell $column.Label $column.Width) -NoNewline -ForegroundColor Cyan
+        Write-Host ' ' -NoNewline
+    }
+    Write-Host ''
+    foreach ($column in $columns) { Write-Host (('-' * $column.Width) + ' ') -NoNewline -ForegroundColor DarkCyan }
+    Write-Host ''
+
+    foreach ($mod in @($Mods | Sort-Object Package)) {
+        foreach ($column in $columns) {
+            $value = $mod.($column.Name)
+            $color = 'Gray'
+            if ($column.Name -eq 'ServerRule') {
+                $color = if ([string]$value -eq 'Yes') { 'Green' } elseif ([string]$value -eq 'No') { 'DarkGray' } else { 'Yellow' }
+            } elseif ($column.Name -eq 'Dependencies') {
+                $color = if ([string]$value -like 'Missing:*') { 'Red' } elseif ([string]$value -eq 'Present') { 'Green' } else { 'DarkGray' }
+            } elseif ($column.Name -eq 'RuntimeState') {
+                $color = switch -Regex ([string]$value) {
+                    '^(Enabled(?: \((?:enabled\.txt|mods\.txt)\))?|PalSchema content deployed)$' { 'Green'; break }
+                    '^(Content not deployed|Deployed but not enabled|Disabled in mods\.txt|PalSchema content not deployed|Invalid Info\.json)' { 'Red'; break }
+                    default { 'DarkGray' }
+                }
+            }
+            Write-Host (Get-ClientTableCell $value $column.Width) -NoNewline -ForegroundColor $color
+            Write-Host ' ' -NoNewline
+        }
+        Write-Host ''
+    }
+    foreach ($mod in @($Mods | Where-Object { $_.Dependencies -like 'Missing:*' })) {
+        Write-Host "Missing dependencies for $($mod.Package): $($mod.Dependencies.Substring(8).Trim())" -ForegroundColor Red
+    }
+    Write-Host ''
+    Write-Host 'Install types: deployment methods declared by the Workshop package, such as Lua, PalSchema, Paks or UE4SS.' -ForegroundColor DarkGray
+    Write-Host 'Server-side: Yes means Info.json contains at least one IsServer=true rule. It does not guarantee multiplayer compatibility.' -ForegroundColor DarkGray
 }
 
 function Get-SteamRoots {
@@ -178,6 +261,9 @@ function Get-Paths {
         GitHubDll = Join-Path $root 'Pal\Binaries\Win64\ue4ss\UE4SS.dll'
         GitHubProxy = Join-Path $root 'Pal\Binaries\Win64\dwmapi.dll'
         GitHubLayout = Join-Path $root 'Pal\Binaries\Win64\ue4ss\MemberVariableLayout.ini'
+        RuntimeMarker = Join-Path $root 'Pal\Binaries\Win64\ue4ss\Palworld-UE4SS-Helper-runtime.json'
+        HelperRoot = Join-Path $root '_UE4SS-Helper'
+        BackupsRoot = Join-Path $root '_UE4SS-Helper\Backups'
     }
 }
 
@@ -226,7 +312,8 @@ function Copy-Directory {
 
 function New-BackupRoot {
     param([hashtable]$Paths, [string]$Operation)
-    $base = Join-Path $Paths.Root "_UE4SS-Helper-Backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$Operation"
+    New-Item -ItemType Directory -Path $Paths.BackupsRoot -Force | Out-Null
+    $base = Join-Path $Paths.BackupsRoot "$(Get-Date -Format 'yyyyMMdd-HHmmss')-$Operation"
     $candidate = $base
     $suffix = 1
     while (Test-Path -LiteralPath $candidate) { $candidate = "$base-$suffix"; $suffix++ }
@@ -244,6 +331,91 @@ function Save-BackupManifest {
     }
     foreach ($key in $Extra.Keys) { $manifest[$key] = $Extra[$key] }
     $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $BackupRoot 'backup-manifest.json') -Encoding UTF8
+}
+
+function Get-RecordValue {
+    param([object]$Record, [string]$Name)
+    if ($null -eq $Record) { return '' }
+    $property = $Record.PSObject.Properties[$Name]
+    if ($null -eq $property -or $null -eq $property.Value) { return '' }
+    return [string]$property.Value
+}
+
+function Save-RuntimeRecord {
+    param([string]$Path, [object]$Package, [string]$Target)
+    $record = [ordered]@{
+        helperVersion = $script:HelperVersion
+        target = $Target
+        installedUtc = [DateTime]::UtcNow.ToString('o')
+        buildKey = $Package.BuildKey
+        buildName = $Package.BuildName
+        repository = $Package.Repository
+        tag = $Package.Tag
+        assetName = $Package.AssetName
+        archiveSha256 = $Package.Sha256
+    }
+    $json = $record | ConvertTo-Json -Depth 4
+    [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding($false)))
+}
+
+function Get-RuntimeRecord {
+    param([hashtable]$Paths)
+    if (Test-Path -LiteralPath $Paths.RuntimeMarker -PathType Leaf) {
+        try {
+            $record = Get-Content -LiteralPath $Paths.RuntimeMarker -Raw | ConvertFrom-Json
+            if (Get-RecordValue $record 'buildKey') {
+                return [pscustomobject]@{ Record=$record; Source='runtime marker' }
+            }
+        } catch { }
+    }
+    if (Test-Path -LiteralPath $Paths.BackupsRoot -PathType Container) {
+        foreach ($folder in @(Get-ChildItem -LiteralPath $Paths.BackupsRoot -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)) {
+            $manifestPath = Join-Path $folder.FullName 'backup-manifest.json'
+            if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { continue }
+            try {
+                $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+                if ((Get-RecordValue $manifest 'operation') -eq 'Install' -and (Get-RecordValue $manifest 'sourceBuild')) {
+                    return [pscustomobject]@{ Record=$manifest; Source='latest helper install backup' }
+                }
+            } catch { }
+        }
+    }
+    return $null
+}
+
+function Get-InstalledRuntimeSummary {
+    param([hashtable]$Paths)
+    $externalDll = Test-Path -LiteralPath $Paths.GitHubDll -PathType Leaf
+    $externalProxy = Test-Path -LiteralPath $Paths.GitHubProxy -PathType Leaf
+    $workshop = Test-Path -LiteralPath $Paths.WorkshopDll -PathType Leaf
+    if ($externalDll -and $externalProxy -and $workshop) {
+        return [pscustomobject]@{ Text='CONFLICT: external and Workshop runtimes are both active'; Color='Red' }
+    }
+    if ($externalDll -xor $externalProxy) {
+        return [pscustomobject]@{ Text='Incomplete external runtime (repair required)'; Color='Red' }
+    }
+    if ($externalDll -and $externalProxy) {
+        $saved = Get-RuntimeRecord $Paths
+        if ($saved) {
+            $record = $saved.Record
+            $buildKey = Get-RecordValue $record $(if ($saved.Source -eq 'runtime marker') { 'buildKey' } else { 'sourceBuild' })
+            $buildName = Get-RecordValue $record 'buildName'
+            if (-not $buildName) {
+                $buildName = switch ($buildKey) {
+                    'Palworld' { 'Palworld-specific Experimental build' }
+                    'Official' { 'Official Experimental build' }
+                    default { "$buildKey build" }
+                }
+            }
+            $tag = Get-RecordValue $record $(if ($saved.Source -eq 'runtime marker') { 'tag' } else { 'sourceTag' })
+            $suffix = if ($tag) { " [$tag]" } else { '' }
+            $evidence = if ($saved.Source -eq 'runtime marker') { '' } else { ' (from last helper install)' }
+            return [pscustomobject]@{ Text="$buildName$suffix$evidence"; Color='Green' }
+        }
+        return [pscustomobject]@{ Text='External Experimental build (provider unknown)'; Color='Yellow' }
+    }
+    if ($workshop) { return [pscustomobject]@{ Text='Palworld Workshop UE4SS runtime'; Color='Green' } }
+    return [pscustomobject]@{ Text='No active UE4SS runtime detected'; Color='Red' }
 }
 
 function Get-ExperimentalRelease {
@@ -466,6 +638,7 @@ function Install-ExperimentalPackage {
         Copy-Ue4ssOverlay $Package.Layout.Ue4ssSource $preparedRoot
         $layoutResult = Ensure-PreparedMemberVariableLayout $Paths $preparedRoot
         Write-Host "MemberVariableLayout.ini: $layoutResult" -ForegroundColor DarkGray
+        Save-RuntimeRecord (Join-Path $preparedRoot 'Palworld-UE4SS-Helper-runtime.json') $Package 'WindowsSteamClient'
         if (-not (Test-Path -LiteralPath (Join-Path $preparedRoot 'UE4SS.dll') -PathType Leaf)) {
             throw 'The prepared UE4SS runtime does not contain UE4SS.dll.'
         }
@@ -558,12 +731,47 @@ function Install-ExperimentalPackage {
 function Get-SafePackageName {
     param([object]$Value, [string]$InfoPath)
     $name = [string]$Value
+    $baseName = ($name -split '\.', 2)[0]
     if ([string]::IsNullOrWhiteSpace($name) -or $name -in @('.', '..') -or
+        $name -cne $name.Trim() -or $name.EndsWith('.') -or
         $name.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
-        $name.Contains('\') -or $name.Contains('/') -or [IO.Path]::IsPathRooted($name)) {
+        $name.Contains('\') -or $name.Contains('/') -or [IO.Path]::IsPathRooted($name) -or
+        $baseName -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$') {
         throw "Unsafe or invalid PackageName in '$InfoPath': '$name'"
     }
     return $name
+}
+
+function Test-IsServerRule {
+    param([object]$Rule)
+    if ($null -eq $Rule) { return $false }
+    $property = $Rule.PSObject.Properties['IsServer']
+    return $null -ne $property -and $property.Value -is [bool] -and [bool]$property.Value
+}
+
+function Get-Ue4ssModsTxtState {
+    param([string]$ModsRoot, [string]$Package)
+    $modsTxt = Join-Path $ModsRoot 'mods.txt'
+    if (-not (Test-Path -LiteralPath $modsTxt -PathType Leaf)) { return 'NotListed' }
+    try {
+        $escaped = [regex]::Escape($Package)
+        $state = 'NotListed'
+        foreach ($line in Get-Content -LiteralPath $modsTxt -ErrorAction Stop) {
+            if ([string]$line -match "^(?i)\s*$escaped\s*:\s*([01])(?:\s*(?:;|#).*)?$") {
+                $state = if ($Matches[1] -eq '1') { 'ModsTxtEnabled' } else { 'ModsTxtDisabled' }
+            }
+        }
+        return $state
+    } catch { return 'Unknown' }
+}
+
+function Get-Ue4ssModActivationState {
+    param([string]$ModsRoot, [string]$Package)
+    $modRoot = Join-Path $ModsRoot $Package
+    if (Test-Path -LiteralPath (Join-Path $modRoot 'enabled.txt') -PathType Leaf) { return 'EnabledFile' }
+    $modsTxtState = Get-Ue4ssModsTxtState $ModsRoot $Package
+    if ($modsTxtState -in @('ModsTxtEnabled','ModsTxtDisabled','Unknown')) { return $modsTxtState }
+    return 'NotEnabled'
 }
 
 function Get-SyncResults {
@@ -588,8 +796,15 @@ function Get-SyncResults {
             if (-not (Test-Path -LiteralPath $mainLua -PathType Leaf) -and -not (Test-Path -LiteralPath $mainDll -PathType Leaf)) {
                 [pscustomobject]@{ Mod=$info.ModName; Package=$package; Result='Content not deployed yet; launch Palworld once' }; continue
             }
-            if (Test-Path -LiteralPath $enabled -PathType Leaf) {
+            $activation = Get-Ue4ssModActivationState $Paths.GitHubMods $package
+            if ($activation -eq 'EnabledFile') {
                 [pscustomobject]@{ Mod=$info.ModName; Package=$package; Result='Already enabled' }; continue
+            }
+            if ($activation -eq 'ModsTxtEnabled') {
+                [pscustomobject]@{ Mod=$info.ModName; Package=$package; Result='Enabled by mods.txt' }; continue
+            }
+            if ($activation -eq 'ModsTxtDisabled') {
+                [pscustomobject]@{ Mod=$info.ModName; Package=$package; Result='Disabled in mods.txt; left unchanged' }; continue
             }
             if ($Apply) { New-Item -ItemType File -Path $enabled -ErrorAction Stop | Out-Null }
             [pscustomobject]@{ Mod=$info.ModName; Package=$package; Result=$(if ($Apply) {'enabled.txt created'} else {'Would create enabled.txt'}) }
@@ -627,17 +842,23 @@ function Show-Status {
         try { Assert-JunctionTarget $Paths.WorkshopMods $Paths.GitHubMods; $junctionTarget = 'Correct' }
         catch { $junctionTarget = "Incorrect: $($_.Exception.Message)" }
     }
-    [pscustomobject]@{
-        'Game folder' = $Paths.Root
-        'GitHub proxy present' = Test-Path -LiteralPath $Paths.GitHubProxy -PathType Leaf
-        'GitHub runtime present' = Test-Path -LiteralPath $Paths.GitHubDll -PathType Leaf
-        'Workshop DLL active' = Test-Path -LiteralPath $Paths.WorkshopDll -PathType Leaf
-        'Disabled Workshop DLL found' = $null -ne (Get-ChildItem -LiteralPath $Paths.WorkshopRoot -Filter 'UE4SS.dll.workshop-disabled*' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
-        'Mods junction present' = $junction
-        'Junction target' = $junctionTarget
-        'MemberVariableLayout.ini present' = Test-Path -LiteralPath $Paths.GitHubLayout -PathType Leaf
-        'UE4SS log present' = Test-Path -LiteralPath (Join-Path $Paths.GitHubRoot 'UE4SS.log') -PathType Leaf
-    } | Format-List
+    $proxy = Test-Path -LiteralPath $Paths.GitHubProxy -PathType Leaf
+    $runtime = Test-Path -LiteralPath $Paths.GitHubDll -PathType Leaf
+    $workshopActive = Test-Path -LiteralPath $Paths.WorkshopDll -PathType Leaf
+    $disabledWorkshop = $null -ne (Get-ChildItem -LiteralPath $Paths.WorkshopRoot -Filter 'UE4SS.dll.workshop-disabled*' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+    $layout = Test-Path -LiteralPath $Paths.GitHubLayout -PathType Leaf
+    $log = Test-Path -LiteralPath (Join-Path $Paths.GitHubRoot 'UE4SS.log') -PathType Leaf
+    $externalActive = $proxy -and $runtime
+
+    Write-AuditValue 'Game folder' $Paths.Root
+    Write-AuditValue 'GitHub proxy present' $proxy $(if ($proxy) { 'Good' } elseif ($runtime) { 'Bad' } else { 'Neutral' })
+    Write-AuditValue 'GitHub runtime present' $runtime $(if ($runtime) { 'Good' } elseif ($proxy) { 'Bad' } else { 'Neutral' })
+    Write-AuditValue 'Workshop DLL active' $workshopActive $(if ($externalActive -and $workshopActive) { 'Bad' } elseif ($workshopActive -or $externalActive) { 'Good' } else { 'Bad' })
+    Write-AuditValue 'Disabled Workshop DLL found' $disabledWorkshop $(if ($externalActive -and $disabledWorkshop) { 'Good' } elseif ($externalActive) { 'Warning' } else { 'Neutral' })
+    Write-AuditValue 'Mods junction present' $junction $(if ($externalActive -and $junction) { 'Good' } elseif ($externalActive) { 'Bad' } else { 'Neutral' })
+    Write-AuditValue 'Junction target' $junctionTarget $(if ($junctionTarget -eq 'Correct') { 'Good' } elseif ($junction) { 'Bad' } else { 'Neutral' })
+    Write-AuditValue 'MemberVariableLayout.ini present' $layout $(if ($externalActive -and $layout) { 'Good' } elseif ($externalActive) { 'Bad' } else { 'Neutral' })
+    Write-AuditValue 'UE4SS log present' $log $(if ($log) { 'Good' } else { 'Neutral' })
 }
 
 function Show-RestorePreview {
@@ -716,22 +937,240 @@ function Restore-WorkshopRuntime {
     }
 }
 
+function Get-ClientModDiagnostics {
+    param([hashtable]$Paths)
+
+    if (-not (Test-Path -LiteralPath $Paths.ManagedRoot -PathType Container)) { return @() }
+
+    $packages = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $entries = New-Object System.Collections.Generic.List[object]
+
+    foreach ($managed in Get-ChildItem -LiteralPath $Paths.ManagedRoot -Directory -ErrorAction SilentlyContinue) {
+        $infoPath = Join-Path $managed.FullName 'Info.json'
+        if (-not (Test-Path -LiteralPath $infoPath -PathType Leaf)) { continue }
+        try {
+            $info = Get-Content -LiteralPath $infoPath -Raw | ConvertFrom-Json
+            $package = Get-SafePackageName $info.PackageName $infoPath
+            [void]$packages.Add($package)
+            $entries.Add([pscustomobject]@{ Managed=$managed; Info=$info; Package=$package; InfoPath=$infoPath })
+        } catch {
+            $entries.Add([pscustomobject]@{ Managed=$managed; Info=$null; Package=$managed.Name; InfoPath=$infoPath; Error=$_.Exception.Message })
+        }
+    }
+
+    $results = foreach ($entry in $entries) {
+        if ($null -eq $entry.Info) {
+            [pscustomobject]@{
+                Mod=$entry.Managed.Name
+                Package=$entry.Package
+                Types='Unknown'
+                ServerRule='Unknown'
+                Dependencies='Unknown'
+                RuntimeState="Invalid Info.json: $($entry.Error)"
+            }
+            continue
+        }
+
+        $rules = @($entry.Info.InstallRule)
+        $types = @($rules | ForEach-Object { [string]$_.Type } | Where-Object { $_ } | Sort-Object -Unique)
+        $hasServerRule = @($rules | Where-Object { Test-IsServerRule $_ }).Count -gt 0
+        $dependencies = @($entry.Info.Dependencies | ForEach-Object { [string]$_ } | Where-Object { $_ })
+        $missing = @($dependencies | Where-Object { -not $packages.Contains($_) })
+
+        $runtimeState = 'Not an UE4SS Lua package'
+        if ('Lua' -in $types) {
+            $destination = Join-Path $Paths.GitHubMods $entry.Package
+            $mainLua = Join-Path $destination 'Scripts\main.lua'
+            $mainDll = Join-Path $destination 'dlls\main.dll'
+            if (-not (Test-Path -LiteralPath $mainLua -PathType Leaf) -and -not (Test-Path -LiteralPath $mainDll -PathType Leaf)) {
+                $runtimeState = 'Content not deployed'
+            } else {
+                $runtimeState = switch (Get-Ue4ssModActivationState $Paths.GitHubMods $entry.Package) {
+                    'EnabledFile' { 'Enabled (enabled.txt)' }
+                    'ModsTxtEnabled' { 'Enabled (mods.txt)' }
+                    'ModsTxtDisabled' { 'Disabled in mods.txt' }
+                    'Unknown' { 'Activation state unknown' }
+                    default { 'Deployed but not enabled' }
+                }
+            }
+        } elseif ('PalSchema' -in $types) {
+            $schemaPath = Join-Path $Paths.GitHubMods (Join-Path 'PalSchema\mods' $entry.Package)
+            $runtimeState = if (Test-Path -LiteralPath $schemaPath -PathType Container) { 'PalSchema content deployed' } else { 'PalSchema content not deployed' }
+        }
+
+        [pscustomobject]@{
+            Mod=[string]$entry.Info.ModName
+            Package=$entry.Package
+            Types=$(if ($types.Count) { $types -join ', ' } else { 'None' })
+            ServerRule=$(if ($hasServerRule) { 'Yes' } else { 'No' })
+            Dependencies=$(if ($missing.Count) { "Missing: $($missing -join ', ')" } elseif ($dependencies.Count) { 'Present' } else { 'No declared dependencies' })
+            RuntimeState=$runtimeState
+        }
+    }
+    return @($results)
+}
+
+function Test-ClientDiagnosticAliasMatch {
+    param([string]$Text, [string]$Alias)
+    if ([string]::IsNullOrWhiteSpace($Text) -or [string]::IsNullOrWhiteSpace($Alias) -or $Alias.Length -lt 4) { return $false }
+    if ($Alias -in @('Error','Fatal','Client','Palworld','Windows','Win64','UE4SS','dwmapi','Scripts','Content','main','Mods')) { return $false }
+    $pattern = '(?i)(?<![A-Za-z0-9_])' + [regex]::Escape($Alias) + '(?![A-Za-z0-9_])'
+    return [regex]::IsMatch($Text, $pattern)
+}
+
+function Get-ClientLogAnalysis {
+    param([hashtable]$Paths)
+    $logCandidates = @(
+        (Join-Path $Paths.GitHubRoot 'UE4SS.log'),
+        (Join-Path $Paths.WorkshopRoot 'UE4SS.log')
+    )
+    $log = $logCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if ($null -eq $log) { return [pscustomobject]@{ Log=$null; Errors=@(); Suspects=@(); Unmapped=@() } }
+
+    $tail = @(Get-Content -LiteralPath $log -Tail 2500 -ErrorAction Stop)
+    $normalized = [regex]::Replace(($tail -join "`n"), '(?=\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', "`n")
+    $lines = @($normalized -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $sessionStart = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '(?i)Starting mods \(from mods\.txt') { $sessionStart = [Math]::Max(0, $i - 80) }
+    }
+    if ($sessionStart -ge 0) { $lines = @($lines | Select-Object -Skip $sessionStart) }
+
+    $mods = @(Get-ClientModDiagnostics $Paths)
+    $errorPattern = '(?i)(\[(?:error|fatal)\]|\berror\b|\bfatal\b|\bexception\b|\bfailed\b|\bfailure\b|\bcrash(?:ed)?\b|\bcould not\b|\bunable to\b|timed out|access violation|stack traceback)'
+    $errors = New-Object System.Collections.Generic.List[object]
+    $unmapped = New-Object System.Collections.Generic.List[object]
+    $suspectMap = @{}
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -notmatch $errorPattern) { continue }
+        $record = [pscustomobject]@{ Index=$i; Line=$lines[$i] }
+        $errors.Add($record)
+        $matches = @($mods | Where-Object {
+            (Test-ClientDiagnosticAliasMatch $record.Line $_.Package) -or
+            (Test-ClientDiagnosticAliasMatch $record.Line $_.Mod)
+        })
+        if ($matches.Count -eq 0) { $unmapped.Add($record); continue }
+        foreach ($mod in $matches) {
+            if (-not $suspectMap.ContainsKey($mod.Package)) {
+                $suspectMap[$mod.Package] = [pscustomobject]@{
+                    Mod=$mod.Mod; Package=$mod.Package; Errors=0;
+                    Lines=(New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase))
+                }
+            }
+            $entry = $suspectMap[$mod.Package]
+            $entry.Errors++
+            $cleanLine = [regex]::Replace($record.Line, '^\[\d{4}-\d{2}-\d{2}\s+[^\]]+\]\s*', '')
+            [void]$entry.Lines.Add($cleanLine)
+        }
+    }
+    $suspects = @($suspectMap.Values | ForEach-Object {
+        [pscustomobject]@{ Mod=$_.Mod; Package=$_.Package; Errors=$_.Errors; Lines=@($_.Lines) }
+    } | Sort-Object @{Expression='Errors';Descending=$true}, Package)
+    return [pscustomobject]@{ Log=$log; Errors=$errors.ToArray(); Suspects=$suspects; Unmapped=$unmapped.ToArray() }
+}
+
+function Show-ClientLogAnalysis {
+    param([hashtable]$Paths)
+    Write-Heading 'Recent UE4SS log diagnosis'
+    $analysis = Get-ClientLogAnalysis $Paths
+    if ($null -eq $analysis.Log) {
+        Write-Host 'No UE4SS.log file was found. Launch the game once, reproduce the problem, then run this report again.' -ForegroundColor Yellow
+        return
+    }
+    Write-Host "Log: $($analysis.Log)" -ForegroundColor DarkGray
+    if ($analysis.Errors.Count -eq 0) {
+        Write-Host 'No obvious error keywords were found in the current log session.' -ForegroundColor Green
+        return
+    }
+    if ($analysis.Suspects.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Mods directly named by errors:' -ForegroundColor Yellow
+        $analysis.Suspects | Select-Object Mod,Package,Errors | Format-Table -AutoSize -Wrap
+        Write-Host 'These errors belong to the named mod, although they do not necessarily mean the whole mod stopped working.' -ForegroundColor DarkGray
+        foreach ($suspect in $analysis.Suspects) {
+            Write-Host ''
+            Write-Host "$($suspect.Mod) [$($suspect.Package)]" -ForegroundColor Yellow
+            foreach ($line in @($suspect.Lines | Select-Object -First 8)) {
+                $displayLine = [string]$line
+                if ($displayLine.Length -gt 900) { $displayLine = $displayLine.Substring(0, 900) + '...' }
+                Write-Host "  $displayLine" -ForegroundColor Red
+            }
+        }
+    }
+    if ($analysis.Unmapped.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Other errors with no reliable installed-mod match:' -ForegroundColor Yellow
+        foreach ($error in @($analysis.Unmapped | Select-Object -First 12)) {
+            $displayLine = [string]$error.Line
+            if ($displayLine.Length -gt 900) { $displayLine = $displayLine.Substring(0, 900) + '...' }
+            Write-Host "  $displayLine" -ForegroundColor Red
+        }
+    }
+}
+
+function Show-MultiplayerDiagnostics {
+    param([hashtable]$Paths)
+
+    Write-Heading 'Client and co-op diagnostics'
+    Write-Host 'This report does not change any files.' -ForegroundColor DarkGray
+    Write-Host ''
+
+    $externalDll = Test-Path -LiteralPath $Paths.GitHubDll -PathType Leaf
+    $externalProxy = Test-Path -LiteralPath $Paths.GitHubProxy -PathType Leaf
+    $workshopDll = Test-Path -LiteralPath $Paths.WorkshopDll -PathType Leaf
+    $externalActive = $externalDll -and $externalProxy
+
+    $junctionState = 'Missing'
+    if (Test-IsJunction $Paths.WorkshopMods) {
+        try { Assert-JunctionTarget $Paths.WorkshopMods $Paths.GitHubMods; $junctionState = 'Correct' }
+        catch { $junctionState = "Incorrect: $($_.Exception.Message)" }
+    } elseif (Test-Path -LiteralPath $Paths.WorkshopMods -PathType Container) {
+        $junctionState = 'Normal directory'
+    }
+
+    $twoRuntimes = $externalActive -and $workshopDll
+    $layout = Test-Path -LiteralPath $Paths.GitHubLayout -PathType Leaf
+    Write-AuditValue 'External UE4SS runtime active' $externalActive $(if ($externalActive) { 'Good' } elseif ($workshopDll) { 'Neutral' } else { 'Bad' })
+    Write-AuditValue 'External UE4SS.dll present' $externalDll $(if ($externalDll -eq $externalProxy) { $(if ($externalDll) { 'Good' } else { 'Neutral' }) } else { 'Bad' })
+    Write-AuditValue 'dwmapi.dll proxy present' $externalProxy $(if ($externalDll -eq $externalProxy) { $(if ($externalProxy) { 'Good' } else { 'Neutral' }) } else { 'Bad' })
+    Write-AuditValue 'Workshop UE4SS.dll active' $workshopDll $(if ($twoRuntimes) { 'Bad' } elseif ($workshopDll -or $externalActive) { 'Good' } else { 'Bad' })
+    Write-AuditValue 'Two UE4SS runtimes active' $twoRuntimes $(if ($twoRuntimes) { 'Bad' } else { 'Good' })
+    Write-AuditValue 'Workshop Mods path' $junctionState $(if ($junctionState -eq 'Correct') { 'Good' } elseif ($externalActive) { 'Bad' } else { 'Neutral' })
+    Write-AuditValue 'MemberVariableLayout.ini present' $layout $(if ($externalActive -and $layout) { 'Good' } elseif ($externalActive) { 'Bad' } else { 'Neutral' })
+
+    if ($externalActive -and $workshopDll) {
+        Write-Host 'CRITICAL: Both UE4SS runtimes appear active. This can cause an immediate crash.' -ForegroundColor Red
+    } elseif ($externalDll -xor $externalProxy) {
+        Write-Host 'WARNING: The external runtime is incomplete; UE4SS.dll and dwmapi.dll must be present together.' -ForegroundColor Yellow
+    }
+
+    Write-Heading 'Installed Workshop mod report'
+    $mods = @(Get-ClientModDiagnostics $Paths)
+    if ($mods.Count) { Write-ClientModReport $mods }
+    else { Write-Host 'No deployed Workshop metadata was found.' }
+
+    Show-ClientLogAnalysis $Paths
+
+    Write-Host ''
+    Write-Host 'A server rule only means that the package declares server-side installation support.' -ForegroundColor DarkGray
+    Write-Host 'It does not guarantee multiplayer compatibility. If UE4SS alone works, re-enable additional mods one at a time.' -ForegroundColor DarkGray
+}
+
 function Select-ExperimentalBuild {
     while ($true) {
         Clear-Host
         Write-Heading 'Choose the UE4SS build to install'
-        Write-Host '1. Official Experimental build (recommended)'
-        Write-Host '   Newest upstream version and the best default for most users.' -ForegroundColor DarkGray
+        Write-Host '1. Palworld-specific Experimental build (recommended)'
+        Write-Host '   Best compatibility in the tested Palworld client/server combinations.' -ForegroundColor DarkGray
         Write-Host ''
-        Write-Host '2. Palworld-specific Experimental build'
-        Write-Host '   Use this if a mod specifically requires it, such as PalSchema,' -ForegroundColor DarkGray
-        Write-Host '   or if you have compatibility problems with the official build.' -ForegroundColor DarkGray
+        Write-Host '2. Official Experimental build'
+        Write-Host '   Newest upstream Experimental version; use it as an alternative when needed.' -ForegroundColor DarkGray
         Write-Host ''
         Write-Host '3. Return to the main menu'
         Write-Host ''
         switch ((Read-Host 'Choose a build').Trim()) {
-            '1' { return $script:Builds.Official }
-            '2' { return $script:Builds.Palworld }
+            '1' { return $script:Builds.Palworld }
+            '2' { return $script:Builds.Official }
             '3' { return $null }
             default { }
         }
@@ -755,6 +1194,67 @@ function Invoke-AutomaticInstall {
     }
 }
 
+function Initialize-GameRoot {
+    if (Test-GameRoot $script:GameRoot) { return }
+    $found = @(Find-PalworldInstallations)
+    if ($found.Count -eq 1) { $script:GameRoot = $found[0] }
+}
+
+function Write-TestedRuntimeCombinations {
+    Write-Heading 'TESTED CLIENT / SERVER COMBINATIONS'
+    Write-Host 'Best tested default: Palworld-specific Experimental on both client and server.' -ForegroundColor Green
+    Write-Host ''
+    Write-Host ('{0,-29} {1,-29} {2}' -f 'Client runtime','Server runtime','Observed result') -ForegroundColor Cyan
+    Write-Host ('{0,-29} {1,-29} {2}' -f ('-' * 28),('-' * 28),('-' * 24)) -ForegroundColor DarkCyan
+    $rows = @(
+        [pscustomobject]@{ Client='Palworld-specific'; Server='Palworld-specific'; Result='Best tested combination'; Color='Green' },
+        [pscustomobject]@{ Client='Palworld-specific'; Server='Official Experimental'; Result='Tested mods worked'; Color='Green' },
+        [pscustomobject]@{ Client='Palworld-specific'; Server='Workshop UE4SS'; Result='Tested mods worked'; Color='Green' },
+        [pscustomobject]@{ Client='Official Experimental'; Server='Palworld-specific'; Result='Tested mods worked'; Color='Green' },
+        [pscustomobject]@{ Client='Official Experimental'; Server='Official Experimental'; Result='Partial: PalSchema worked; direct Lua did not'; Color='Yellow' },
+        [pscustomobject]@{ Client='Official Experimental'; Server='Workshop UE4SS'; Result='Partial: PalSchema worked; direct Lua did not'; Color='Yellow' }
+    )
+    foreach ($row in $rows) {
+        Write-Host ('{0,-29} {1,-29} {2}' -f $row.Client,$row.Server,$row.Result) -ForegroundColor $row.Color
+    }
+    Write-Host ''
+    Write-Host 'Specifically, Bigger Palbox (PalSchema) worked while Infinite Weight In Camp (direct Lua) did not.' -ForegroundColor DarkGray
+    Write-Host 'These are observations from the tested mod set, not universal compatibility guarantees.' -ForegroundColor DarkGray
+}
+
+function Show-ClientInstructions {
+    Write-Host ('=' * 72) -ForegroundColor Yellow
+    Write-Host '                     INSTRUCTIONS / READ ME' -ForegroundColor Yellow
+    Write-Host ('=' * 72) -ForegroundColor Yellow
+    Write-Host ''
+    Write-Host 'FIRST INSTALLATION' -ForegroundColor Cyan
+    Write-Host '  1. Close Palworld completely.'
+    Write-Host '  2. Use option 1 and install the Palworld-specific Experimental build.'
+    Write-Host '  3. Read the preview and confirm only when the detected folder is correct.'
+    Write-Host '  4. Use option 3 to check the finished installation.'
+    Write-Host '  5. Start Palworld and test your mods.'
+    Write-Host ''
+    Write-Host 'AFTER SUBSCRIBING TO NEW WORKSHOP MODS' -ForegroundColor Cyan
+    Write-Host '  Let Palworld deploy them, close the game, then use option 2 to synchronize them.'
+    Write-Host ''
+    Write-Host 'IF SOMETHING STOPS WORKING' -ForegroundColor Cyan
+    Write-Host '  Use option 4 for a read-only diagnostic. Try the Palworld-specific build when a mod behaves differently with the official build.'
+    Write-Host '  Option 5 restores the normal Workshop runtime. It does not unsubscribe from Workshop items.'
+    Write-Host ''
+    Write-Host 'The helper does not require administrator rights. File-changing operations create timestamped backups.' -ForegroundColor DarkGray
+    Write-TestedRuntimeCombinations
+    Write-Heading 'CREDITS AND OFFICIAL DOWNLOAD'
+    Write-Host 'Original scripts and helpers by:' -ForegroundColor Cyan
+    Write-Host '  ZdradaKali (GitHub): https://github.com/ZdradaKali'
+    Write-Host '  Yani Neco (Steam)  : https://steamcommunity.com/id/0peraGX/'
+    Write-Host '  hess_ch (Discord)'
+    Write-Host 'Three names, still the same asshole.' -ForegroundColor DarkMagenta
+    Write-Host 'Official project: https://github.com/ZdradaKali/Palworld-UE4SS-Workshop-Helper' -ForegroundColor Green
+    Write-Host ''
+    Write-Host 'SECURITY: Copies obtained from any other source are unverified and may have been modified.' -ForegroundColor Yellow
+    Write-Host 'Do not run an unverified copy; download a fresh release from the official GitHub project.' -ForegroundColor Yellow
+}
+
 function Invoke-MenuAction {
     param([scriptblock]$Action)
     Clear-Host
@@ -763,29 +1263,47 @@ function Invoke-MenuAction {
     Wait-ForMenu
 }
 
+### CLIENT HELPER ENTRYPOINT ###
 try {
     $Host.UI.RawUI.WindowTitle = "Palworld UE4SS Workshop Helper v$($script:HelperVersion)"
+    Initialize-GameRoot
     $finished = $false
     while (-not $finished) {
         Clear-Host
         Write-Host "Palworld UE4SS Workshop Helper v$($script:HelperVersion)" -ForegroundColor Cyan
         Write-Host 'Experimental UE4SS - Windows Steam client version' -ForegroundColor DarkGray
+        Write-Host 'By ZdradaKali (GitHub) / Yani Neco (Steam) / hess_ch (Discord)' -ForegroundColor DarkMagenta
         Write-Host ''
-        if ($script:GameRoot) { Write-Host "Selected installation: $($script:GameRoot)" -ForegroundColor DarkGray; Write-Host '' }
+        if (Test-GameRoot $script:GameRoot) {
+            $homePaths = Get-Paths
+            $runtime = Get-InstalledRuntimeSummary $homePaths
+            Write-Host "Selected installation: $($script:GameRoot)" -ForegroundColor DarkGray
+            Write-Host 'Installed UE4SS: ' -NoNewline -ForegroundColor DarkGray
+            Write-Host $runtime.Text -ForegroundColor $runtime.Color
+            Write-Host ''
+        } else {
+            Write-Host 'Selected installation: Not selected yet' -ForegroundColor DarkGray
+            Write-Host 'Installed UE4SS: Select an installation first' -ForegroundColor DarkGray
+            Write-Host ''
+        }
         Write-Host '1. Install or update Experimental UE4SS automatically'
         Write-Host '2. Synchronize new Workshop UE4SS mods'
         Write-Host '3. Check the current installation'
-        Write-Host '4. Restore the normal Workshop UE4SS runtime'
-        Write-Host '5. Select a different Palworld installation folder'
-        Write-Host '6. Exit'
+        Write-Host '4. Run client and co-op diagnostics'
+        Write-Host '5. Restore the normal Workshop UE4SS runtime'
+        Write-Host '6. Select a different Palworld installation folder'
+        Write-Host '7. >>> INSTRUCTIONS / READ ME <<<' -ForegroundColor Yellow
+        Write-Host '8. Exit'
         Write-Host ''
         switch ((Read-Host 'Choose an option').Trim()) {
             '1' { Invoke-MenuAction { Invoke-AutomaticInstall } }
             '2' { Invoke-MenuAction { Invoke-Synchronization (Get-Paths) } }
             '3' { Invoke-MenuAction { Show-Status (Get-Paths) } }
-            '4' { Invoke-MenuAction { $p=Get-Paths; $d=Show-RestorePreview $p; if (Read-YesNo 'Restore Workshop UE4SS now?') { Restore-WorkshopRuntime $p $d } else { Write-Host 'Restoration cancelled. No files were changed.' } } }
-            '5' { Invoke-MenuAction { $script:GameRoot=$null; Select-GameRoot; Write-Host "Selected: $($script:GameRoot)" -ForegroundColor Green } }
-            '6' { $finished = $true }
+            '4' { Invoke-MenuAction { Show-MultiplayerDiagnostics (Get-Paths) } }
+            '5' { Invoke-MenuAction { $p=Get-Paths; $d=Show-RestorePreview $p; if (Read-YesNo 'Restore Workshop UE4SS now?') { Restore-WorkshopRuntime $p $d } else { Write-Host 'Restoration cancelled. No files were changed.' } } }
+            '6' { Invoke-MenuAction { $script:GameRoot=$null; Select-GameRoot; Write-Host "Selected: $($script:GameRoot)" -ForegroundColor Green } }
+            '7' { Invoke-MenuAction { Show-ClientInstructions } }
+            '8' { $finished = $true }
             default { }
         }
     }
